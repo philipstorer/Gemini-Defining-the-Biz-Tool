@@ -30,16 +30,13 @@ try:
     # Get all column names after the first one
     all_potential_differentiators = df_defaults.columns[1:].tolist()
 
-    # *** NEW: Filter out columns named 'Score' (case-insensitive) ***
+    # Filter out columns named 'Score' (case-insensitive)
     differentiators = [
         d for d in all_potential_differentiators
         if d.strip().lower() not in ['score', 'total score'] # Exclude columns named Score or Total Score
     ]
 
-    # Inform user if a score column was excluded from sliders
-    if len(differentiators) < len(all_potential_differentiators):
-        excluded_cols = [d for d in all_potential_differentiators if d not in differentiators]
-        st.info(f"Note: Found column(s) named like 'Score' ({', '.join(excluded_cols)}) in the input. These columns will not have input sliders.")
+    # *** Removed the st.info message about excluded columns ***
 
     if df_defaults.empty or df_defaults.shape[0] < 1:
         st.error("Error: Excel sheet has no data rows.")
@@ -47,7 +44,6 @@ try:
     opportunity_col_name = df_defaults.columns[0]
     business_opportunities = df_defaults[opportunity_col_name].dropna().unique().tolist()
 
-    # Now 'differentiators' list only contains columns that should have sliders
     if not differentiators or not business_opportunities:
         st.error("Error: Could not extract opportunities or valid differentiators (after excluding 'Score' columns). Check Excel format.")
         st.stop()
@@ -67,61 +63,81 @@ except Exception as e:
 
 
 # --- Initialize Session State for Scores using Defaults from Excel ---
-# Uses the filtered 'differentiators' list
+# This section runs only once when the app starts or session state is cleared
 if 'scores' not in st.session_state:
     st.session_state.scores = {}
-    initialization_warnings = []
-    # Only loop through the *filtered* list of differentiators for sliders
+    initialization_warnings = [] # To store notes about default loading
+    # Loop through opportunities and the *filtered* differentiators
     for opportunity in business_opportunities:
         for differentiator in differentiators: # Uses filtered list
             slider_key = f"{opportunity}_{differentiator}"
-            default_value = 3 # Default fallback value
+            # Default value if lookup fails or data is invalid
+            default_value_fallback = 3
 
             try:
-                # Look up the value in the DataFrame using the differentiator name
-                # Check if differentiator column exists in the original df before accessing
-                if differentiator in df_defaults.columns:
+                # Look up the value in the DataFrame using the opportunity and differentiator names
+                if differentiator in df_defaults.columns: # Check column exists in loaded data
                     raw_value = df_defaults.loc[opportunity, differentiator]
-                    # Check if the value is numeric and not NaN
+
+                    # Validate the raw value from the Excel sheet
                     if pd.notna(raw_value) and isinstance(raw_value, (int, float, np.number)):
+                        # It's a number, round it and clamp between 1 and 5
                         clamped_value = int(round(float(raw_value)))
-                        default_value = max(1, min(5, clamped_value))
-                        if default_value != clamped_value:
-                             initialization_warnings.append(f"Clamped value for '{opportunity}' / '{differentiator}' from {raw_value} to {default_value}.")
-                    elif pd.notna(raw_value): # Value exists but is not numeric
-                        initialization_warnings.append(f"Non-numeric value '{raw_value}' found for '{opportunity}' / '{differentiator}'. Using default 3.")
+                        # Apply clamping: max(1, min(5, value)) ensures it's within range
+                        final_value = max(1, min(5, clamped_value))
+
+                        # Store the successfully loaded and clamped value
+                        st.session_state.scores[slider_key] = final_value
+
+                        # Note if clamping occurred (value was outside 1-5)
+                        if final_value != clamped_value:
+                             initialization_warnings.append(f"Clamped value for '{opportunity}' / '{differentiator}' from {raw_value} to {final_value}.")
+
+                    else:
+                        # Value is present but not a number (e.g., text)
+                        st.session_state.scores[slider_key] = default_value_fallback
+                        if pd.notna(raw_value): # Avoid warning for actual blank cells
+                             initialization_warnings.append(f"Non-numeric value '{raw_value}' found for '{opportunity}' / '{differentiator}'. Using default {default_value_fallback}.")
+                        else: # Handle blank cells slightly differently if needed, or just use fallback
+                             initialization_warnings.append(f"Missing value for '{opportunity}' / '{differentiator}'. Using default {default_value_fallback}.")
+
                 else:
-                     initialization_warnings.append(f"Differentiator column '{differentiator}' not found for defaults. Using default 3.")
+                     # Should not happen if differentiator list is derived correctly, but as safeguard
+                     initialization_warnings.append(f"Differentiator column '{differentiator}' not found in data for defaults. Using default {default_value_fallback}.")
+                     st.session_state.scores[slider_key] = default_value_fallback
 
             except KeyError:
-                 initialization_warnings.append(f"Could not find entry for '{opportunity}' / '{differentiator}'. Using default 3.")
+                 # Opportunity name might be missing in the index
+                 initialization_warnings.append(f"Could not find opportunity '{opportunity}' in index for defaults. Using default {default_value_fallback} for '{differentiator}'.")
+                 st.session_state.scores[slider_key] = default_value_fallback
             except Exception as e:
-                 initialization_warnings.append(f"Error reading default for '{opportunity}' / '{differentiator}': {e}. Using default 3.")
-
-            st.session_state.scores[slider_key] = default_value
+                 # Catch any other unexpected error during lookup/processing
+                 initialization_warnings.append(f"Error reading default for '{opportunity}' / '{differentiator}': {e}. Using default {default_value_fallback}.")
+                 st.session_state.scores[slider_key] = default_value_fallback
 
     # Display warnings if any issues occurred during default value loading
+    # *** Reinstated this section to help debug default value issues ***
     if initialization_warnings:
         with st.expander("Initialization Notes (Defaults)"):
+            st.write("These notes indicate if default values from Excel could not be read correctly:")
             for warning in initialization_warnings:
                 st.warning(warning)
 
 
 # --- Live Score Calculation & Sidebar Display ---
-# Uses the filtered 'differentiators' list
 live_results = {}
 for opportunity in business_opportunities:
     total_score = 0
-    # Calculate score based ONLY on the filtered differentiators (those with sliders)
-    for differentiator in differentiators: # Uses filtered list
+    for differentiator in differentiators:
         slider_key = f"{opportunity}_{differentiator}"
+        # Read the current value from session_state, fallback to 3 if somehow missing post-init
         total_score += st.session_state.scores.get(slider_key, 3)
     live_results[opportunity] = total_score
 
 live_results_df = pd.DataFrame(list(live_results.items()), columns=['Business Opportunity', 'Current Score'])
 live_results_df = live_results_df.sort_values(by='Current Score', ascending=False).reset_index(drop=True)
 
-st.sidebar.subheader("Live Calculated Scores") # Renamed for clarity
+st.sidebar.subheader("Live Calculated Scores")
 st.sidebar.dataframe(
     live_results_df,
     use_container_width=True,
@@ -130,25 +146,24 @@ st.sidebar.dataframe(
 st.sidebar.markdown("---")
 
 # --- Main Area: Form for Rating ---
-# Uses the filtered 'differentiators' list
 st.header("Rate Each Opportunity (1-5)")
 st.write("Adjust sliders for relevant differentiators. Scores calculated live in sidebar.")
 
 with st.form("rating_form"):
     for opportunity in business_opportunities:
         st.markdown(f"#### {opportunity}")
-        # Create columns ONLY for the filtered differentiators
-        cols = st.columns(len(differentiators)) # Uses filtered list count
-        for i, differentiator in enumerate(differentiators): # Uses filtered list
+        # Use columns for layout - this should prevent excessive width
+        cols = st.columns(len(differentiators))
+        for i, differentiator in enumerate(differentiators):
             slider_key = f"{opportunity}_{differentiator}"
             with cols[i]:
                 st.slider(
-                    label=differentiator, # Display the actual differentiator name
+                    label=differentiator,
                     min_value=1,
                     max_value=5,
-                    key=slider_key,
+                    key=slider_key, # Links slider to st.session_state.scores[slider_key]
                 )
-        st.markdown("<br>", unsafe_allow_html=True)
+        st.markdown("<br>", unsafe_allow_html=True) # Add space
 
     submitted = st.form_submit_button("Confirm Ratings")
 
